@@ -13,6 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Cel projektu
 Celem projektu bylo porownanie danych z sygnalow EKG oraz oddechu (Flow) pobranych podczas snu w grupie 25 pacjentow cierpiacych na problemy senne. Dokonano wizualizacji danych za pomoca aplikacji w shiny, ktora pozwala na obejrzenie przebiegu oby parametrow podczas dowolnej chwili snu wybranego pacjenta. Dane sa pobierane bezposrednio ze strony znajdujacej sie w bazie physionet. 
+Efekt pracy znajduje sie pod linkiem: https://mladogor.shinyapps.io/Projekt/
 
 # Przygotowanie środowiska
 Niezbedne bylo wczytanie kilku bibliotek, które umożliwiy prawidow obrobke i wizualizacje danych. Funkcje poszczegolnych pakietow to:
