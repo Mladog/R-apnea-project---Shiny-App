@@ -1,0 +1,575 @@
+---
+title: "Projekt R"
+author: "Magdalena Ładogórska"
+date: "30 01 2021"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Cel projektu
+Celem projektu bylo porownanie danych z sygnalow EKG oraz oddechu (Flow) pobranych podczas snu w grupie 25 pacjentow cierpiacych na problemy senne. Dokonano wizualizacji danych za pomoca aplikacji w shiny, ktora pozwala na obejrzenie przebiegu oby parametrow podczas dowolnej chwili snu wybranego pacjenta. Dane sa pobierane bezposrednio ze strony znajdujacej sie w bazie physionet. 
+
+# Przygotowanie środowiska
+Niezbedne bylo wczytanie kilku bibliotek, które umożliwiy prawidow obrobke i wizualizacje danych. Funkcje poszczegolnych pakietow to:
+
+* **shiny** - utworzenie aplikacji webowych.
+* **edf, edfReader** - wczytywanie i obrobka danych w formacie edf (sciagniecie pliku w rozszerzeniu .rec).
+* **ggplot2** - utworzenie historgamow.
+* **rio** - mozliwosc importowania danych dowolnego formatu z adresu url (w tym przypadku rozszerzenie .xls).
+* **dplyr** - wstępne przetwarzenie i przygotowanie ramki danych do dalszej analizy.
+* **stringr** - mozliwosc zamiany liczby probek sygnalu na czas w formacie hh:mm:ss.
+* **ggpubr** - mozliwosc ukazania 4 histogramow na jednym obrazku.
+* **data.table** - wczytanie danych w formacie html.
+* **RHRV** - pakiet potrzebny do analizy danych EKG
+
+```{r biblioteki, message=FALSE, warning = FALSE}
+library(shiny)
+library(edf)
+library(edfReader)
+library(ggplot2)
+library(rio)
+library(dplyr)
+library(stringr)
+library(ggpubr)
+library(data.table)
+library(hms)
+library(RHRV)
+```
+
+## Wczytywanie danych informacyjnych
+Pierwszym podjetym krokiem bylo wczytanie oraz odpowiednia obrobka informacji o pacjentach. Wybrano dane z 5 kolumn, zawierajacych informacje o numerze pacjenta, jego wadze, plci, wzroscie, wieku, godzinie rozpoczecia badania i czasie jego trwania.
+
+```{r wczytanie details, message = FALSE}
+#download patients details
+URL <- 'http://physionet.org/files/ucddb/1.0.0/SubjectDetails.xls?download'
+details <- rio::import(URL)
+ddetails <- details %>% select(1,4,5,6,8,9,11)
+
+```
+## Obróbka danych informacyjnych
+Kolejnym krokiem byla obrobka danych do wizualizacji. Zmieniono nazwe dwoch z kolumn oraz nazwe zmiennych z kolumny Gender odpowiednio: M -> Male oraz F -> Female. Dodano zmienna informujaca o wystepowaniu otylosci u pacjenta w zaleznosci od wartosci jego BMI.
+
+```{r Przygotowanie informacji przed wizualizacja, message = FALSE}
+colnames(details)[2]  <- "Weight"
+colnames(details)[4] <- "sleep_start"
+#changing information
+for (i in 1:25){
+    if (details$Gender[i]=='F'){
+        details$Gender[i] = 'Female'
+    } else{
+        details$Gender[i] = 'Male'
+    }
+}
+
+for (i in 1:25){
+    if (details$BMI[i] > 30){
+        details$Obesity[i] = 'True'
+    }else{
+        details$Obesity[i] = 'False'
+    }
+}
+```
+## Wizualizacja danych informacyjnych
+Dane zostaly zwizualizowane poprzez histogramy. Dla lepszej wizualizacji niektore histogramy maja dostosowane odpowiedznie kolory. Histogram przedstawiajacy plec zostal zobrazowany przez dwa kolory kojarzone z konkretnymi plciami (rozowy - kobiety, niebieski - mezczyzni). Histogram przedstawiajacy BMI zostal rowniez podzielony na dwa kolory, z ktorych jeden oznacza wystapienie nieprawidlowego BMI - otylosc (kolor czerwony) oraz BMI w normie (kolor zielony). Histogramy znajduja sie w ostatniej zakladce w aplikacji.
+
+```{r Wizualizacja informacji, warning = FALSE}
+Gen <- ggplot(details, aes(x = Gender)) + geom_bar(fill = c("violetred3", "steelblue")) + theme_bw()
+BMI <- ggplot(details, aes(x = BMI, fill = Obesity)) + geom_bar() + theme_bw() + scale_fill_manual(values=c("seagreen4", "tomato3"))
+AGE <- ggplot(details, aes(x = Age)) + geom_bar() + theme_bw() 
+Weight <- ggplot(details, aes(x = Weight)) + geom_bar(width = .5) + theme_bw()
+
+ggarrange(Gen, BMI, AGE, Weight, 
+          labels = c("A", "B", "C", "D"),
+          ncol = 2, nrow = 2)
+```
+
+## Przygotowanie linkow do pobrania danych
+Kolejne dane wczytywane sa juz zaleznie od wyboru uzytkownika w aplikacji shiny. Na wstepie nalezalo przygotowac dane, do ktorych beda sie odnosic kolejne funkcje w aplikacji. W bazie physionet znajduja sie dane 25 pacjentow, jednak nie sa oni numerowani od 1 do 25, wiec potrzebne bylo utworzenie listu adresow URL wzgledem ich numeru podczas badania. Nalezalo ominac dane pacjentow 1, 4 oraz 16. Nastepnym krokiem bylo utworzenie dwoch wektorow zawierajacych adresy plikow do pobrania przez srodowisko - jeden z plikow zawiera informacje o wszystkich sygnalach zebranych podczas badania (adres przechowywany jest w wektorze lifecards), natomiast drugi informacje pochodzace od lekarza, ktory okresla wystapienie nieprawidlowosci oddechowej (adres przechowywany w wektorze links).
+
+```{r patients}
+#creating patients
+file_name <- rep(0,25)
+j <- c(1:28)
+k <- c(1,4,16)
+m <- setdiff(j,k)
+
+remove(j,k)
+
+for (i in 1:7){
+    file_name[i] <- paste("ucddb", m[i], sep="00")
+}
+for (i in 8:25){
+    file_name[i] <- paste("ucddb", m[i], sep="0")
+}
+
+remove(m, i)
+
+links <-rep('https://physionet.org/files/ucddb/1.0.0/',25)
+lifecards <- rep('https://physionet.org/files/ucddb/1.0.0/',25)
+for (i in 1:25){
+    lifecards[i] <- paste(lifecards[i], file_name[i], ".rec?download", sep = "")
+    links[i] <- paste(links[i], file_name[i],"_respevt.txt?download", sep = "")
+}
+```
+## Aplikacja w shiny - UI
+Kolejne dane, beda tworzone i wyswietlane na podstawie wyboru uzytkownika. Intefejs w aplikacji zostal zdefiniowany poprzez ponizszy kod. 
+Oznaczenia nastepujacych fragmentow sidebara:
+
+* **hours** odpowiada godzinie badania, ktora ma zostac wyswietlona
+* **minutes** odpowiada minucie badania, ktora ma zostac wyswietlona
+* **patient** oznacza numer pacjenta, ktorego dane zostaja wczytane
+
+poza tym dodano komunikaty, informujace o mozliwosci pojawienia sie bledu oraz ostrzegajace przed dlugim czasem wczytywania sie danych.
+
+```{r UI, eval = FALSE}
+
+shinyUI(fluidPage(
+
+    # Application title
+    titlePanel("University College Dublin Sleep Apnea Database"),
+
+    sidebarLayout(
+        sidebarPanel(
+            sliderInput("hours",
+                        "Choose hour from which you want to start",
+                        min = 0,
+                        max = 7,
+                        value = 2),
+
+            sliderInput("minutes",
+                        "Choose minute from which you want to start",
+                        min = 0,
+                        max = 59,
+                        value = 30,
+                        step = 0.5),
+            
+            h5("Note: if there is an error - you have gone beyond the person's sleep time. Choose a lower value "),
+            
+            selectInput("patient", "Select the patient", c(1:25), selected = 1),
+            h5("Note: downloading a data may take a while. Please, be patient")
+            
+        )
+
+```
+
+## Zakladki
+W aplikacji dodano zakladki, w ktorych pojawiaja sie kolejne informacje lub wykresy.
+```{r menu, eval=FALSE}
+        mainPanel(
+            tabsetPanel(
+                tabPanel("Graphs",verbatimTextOutput("legend"),
+                         plotOutput("wykresy_ekg_flow"),
+                         verbatimTextOutput("time_range")),
+                tabPanel("The occurrence of disorders ",
+                         verbatimTextOutput("apnea_time"),
+                         verbatimTextOutput("hypo_time")
+                         ),
+                tabPanel("Boxplots", plotOutput("boxes")),
+                tabPanel("Histogram", 
+                         verbatimTextOutput("histext"),
+                         plotOutput("distPlot")
+                ))))))
+```
+
+### tabPanel Graphs
+W pierwszym panelu pojawiaja sie wykresy przebiegu ECG oraz Flow danego pacjenta oraz krotki opis jak je odczytywac. Wartosci zaznaczone na zolto na wykresie oznaczaja momenty wystapienia bezdechu sennego, natomiast na niebisko oznaczono splycenie oddechu. Pod wykresami znajduje sie czas calego badania - zostal on odczytany z wczytanego wczeniej pliku details oraz odpowiednio przeksztalcony z formatu godzinowego (np. 6,5h) do formatu hh:mm.
+
+``` {r tabpanel1, eval=FALSE}
+
+hours <- floor(details$`Study Duration (hr)`) #round to nearest smaller integer
+minutes <- rep(0,25)
+for (i in 1:25){
+    minutes[i] <- (details$`Study Duration (hr)`[i] - hours[i])*60
+    
+    chosen <- reactive(as.numeric(input$patient))
+    
+    output$time_range <- renderText({
+        paste("This person slept for ",as.character(hours[chosen()]),"hours and ",as.character(minutes[chosen()]), "minutes")
+    })
+}
+```
+#### Wczytywanie danych konkretnego pacjenta
+Aby wyswietlic dane konkretnego pacjenta, odwolujemy sie do utorzonych wczesniej linkow celem wczytania ich do srodowsika. Wyboru dokonujemy za pomoca zmiennej chosen(), ktora przekazuje wybor numeru pacjenta przez uzytkownika. Do zmiennej patient wczytujemy przebiegi zebranych sygnalow, natomiast do zmiennej data informacje o zaburzeniach wystepujacych podczas snu danego pacjenta - dla ulatwienia rozdzielamy dane informujace o wystapieniu bezdechu od danych informujacych o wystapieniu splycenia oddechowego. Ponizszy kod zawiera poczatek funkcji    *output$wykresy_ekg_flow <- renderPlot*, ktorej dalszy fragment zostanie przedstawiony pozniej.
+
+```{r pacjent, eval = FALSE}
+
+    patient1 <- reactive(read.edf(lifecards[chosen()]))
+    output$wykresy_ekg_flow <- renderPlot({
+        #view time
+        patient <- patient1()
+        dana <- data.table::fread(links[chosen()], sep="auto", header=TRUE, skip=2, fill=TRUE)
+        dana <- dana[,c(1,2,3)]
+        names(dana)[3] <- "Duration"
+        if_apnea <- which(grepl("APN",dana$Type))
+        if_hypopnea <- which(grepl("HYP",dana$Type))
+        apnea <- dana[if_apnea]
+        hyp <- dana[if_hypopnea]
+
+```
+
+Ze wzgledu na to, ze dane dotyczace badania pochodza z dwoch roznych plikow pojawil sie problem podawania czasu w roznych formatach, ktore nalezalo ujednolicic. Dane w pliku dana oraz details zawieraja zmienne oznaczajaca czas rozpoczecia badania oraz czas wystapienia nieprawidlowosci oddechowych w formacie "hh:mm:ss", natomiast odczytywane przez nas dane nie maja wcale podanego czasu, tylko numer probki. Sygnal ECG byl probkowany 128 razy na sekunde, natomiast sygnal Flow - 16 razy na sekunde. Postanowiono ujednolicic wyswietlanie czasu i sprowadzic wszystko do czasu badania.Posluzyly do tego dwie nowoutworzone funkcje.\ Funkcja convert_to_midn, jest funkcja informujaca ile sekund po polnocy mialo miejsce dane zdarzenie. Funkcja ta moze zwrocic wartosc ujemna w przypadku, gdy zdarzenie mialo miejsce przed godzina 24. Zastosowano takie rozwiazanie, aby godzina 22 oraz 23 wystepowaly jako zdarzenia wczesniejsze niz te majace miejsce po polnocy. Nie rozpatrywano godzin wczesniejszych niz 22, poniewaz zaden z pacjentow z naszej bazy nie zasnal o wczesniejszej porze.
+
+\ Funkcja time_apn sluzy do porownania czasu wystapienia nieprawidolowsci oddechowej (bezdech/splycenie) i czasu rozpoczenia badania. Zwracana jest sekunda, w ktorej zaobserwowano nieprawidlowosc u danego pacjenta.
+
+```{r funkcje, eval = FALSE }
+convert_to_midn<- function(time) {
+    ile_23 <- (str_split(toString(time), ":", simplify = TRUE))
+    hh <- as.numeric(ile_23[1,1])
+    mm <- as.numeric(ile_23[1,2])
+    ss <- as.numeric(ile_23[1,3])
+    
+    if (hh == 23){
+        sec = 60-ss
+        min = 60-(mm+1)
+        till_midnight = -(sec+min*60)
+    }
+    else if (hh == 22){
+        sec = 60-ss
+        min = 60-(mm+1)
+        till_midnight = -(sec+min*60+3600)
+    }
+    else{
+        till_midnight = ss+mm*60+hh*3600
+    }
+    return(till_midnight)
+}
+
+
+time_apn <- function(start, problem){
+    badanie <- convert_to_midn(start)
+    wypadek <- convert_to_midn(problem)
+    
+    sek_badania <- wypadek - badanie
+    return(sek_badania)
+}
+```
+## Wyswietlenie wykresow
+Aby wyswietlic wyniki nalezalo pobrac z interfejsu uzytkownika czas badania, ktory ma byc wyswietlony. Wykres pokazuje 30 sekund badania od momentu wybranego przez uzytkownika. Pobierana wartosc musi wyrazona w sekundach\*128 dla ECG, oraz 16 razy mniejsza dla Flow. Dla wiekszej przejrzystosci utworzono zmienne time_axis, ktore zamieniaja czas na wartosci wyrazone w formacie hh:mm:ss. Na wykres nakladamy kolorowe tlo w momencie, w ktorym wystepuje jakas dolegliwosc oddechowa. Sluzy nam do tego funkcja polygon(), ktorej zmienna x jest zdefiniowana przez pierwszy i ostatni numer probki wystepujacej podczas nieprawidlowosci, natomiast zmienna y jest dobrana tak, aby zajmowac cala wysokosc danego przedzialu. Ponizej przedstawiono kod oraz przykladowy wykres przedstawiajacy pojawienie sie nieprawidlowosci (bezdechu). Ponizszy kod jest kontynuacja funkcji    *output$wykresy_ekg_flow <- renderPlot*
+```{r wykresy shiny, eval=FALSE}
+
+        start_ecg <- (input$hours*3600 + input$minutes*60)*128
+        start_flow <- start_ecg/16 #16 times less ticks
+        seconds <- 30
+        stop_ecg <- start_ecg+(128*seconds) #sampling -> 128 ticks per second
+        stop_flow <- start_flow+(8*seconds) #sampling -> 8 ticks per second
+
+        start <- (start_ecg/128)
+        stop <- (stop_ecg/128)
+        time_axis <-seq(start,stop,5)
+        time_axis2 <- as.character(hms(time_axis))
+        time_axis_ecg <- time_axis*128
+        time_axis_flow <- time_axis*8
+
+        #creating a plot
+
+        ECG_signal <- patient$signal$ECG$data[start_ecg:stop_ecg]
+        Flow_signal <- patient$signal$Flow$data[start_flow:stop_flow]
+        time_ecg = c(start_ecg:stop_ecg)
+        time_flow = c(start_flow:stop_flow)
+
+        for (i in 1:nrow(apnea)){
+            apnea[i,1] <- time_apn(details$sleep_start[chosen()],apnea[i,1])
+            apnea[i,1] <- as.numeric(apnea[i,1])*128 #128 tickcs per second
+        }
+        
+        for (i in 1:nrow(hyp)){
+            hyp[i,1] <- time_apn(details$sleep_start[chosen()],hyp[i,1])
+            hyp[i,1] <- as.numeric(hyp[i,1])*128 #128 tickcs per second
+        }
+
+        apnea_view <- apnea
+        apnea_view$Time <- hms(as.numeric(apnea_view$Time)/128)
+        hyp_view <- hyp
+        hyp_view$Time <- hms(as.numeric(hyp_view$Time)/128)
+        apnea_view <- as.data.frame(apnea_view)
+        hyp_view <- as.data.frame(hyp_view)
+        
+        duration_ap <- rep(NA, nrow(apnea))
+        duration_hyp <- rep(NA, nrow(hyp))
+
+        for (i in 1:nrow(apnea)){
+            duration_ap[i] <- as.numeric(apnea[i,3])
+        }
+        for (i in 1:nrow(hyp)){
+            duration_hyp[i] <- as.numeric(hyp[i,3])
+        }
+
+        remove(i)
+
+        par(mar = rep(2, 4), mfrow=c(2,1))
+        plot (time_ecg, ECG_signal, type ='l', xaxt='n')
+        axis(1,at = time_axis_ecg[1:7],labels = time_axis2[1:7])
+        for (i in 1:nrow(apnea)){
+            polygon(x=c(as.numeric(apnea[i,1]),as.numeric(apnea[i,1]),(as.numeric(apnea[i,1])+duration_ap[i]*128),(as.numeric(apnea[i,1])+duration_ap[i]*128)), y=c(-10,10,10,-10), col="#FF990022", border=F)
+        }
+        for (i in 1:nrow(hyp)){
+            polygon(x=c(as.numeric(hyp[i,1]),as.numeric(hyp[i,1]),(as.numeric(hyp[i,1])+duration_hyp[i]*128),(as.numeric(hyp[i,1])+duration_hyp[i]*128)), y=c(-10,10,10,-10), col="#0000FF22", border=F)
+        }
+
+        plot(time_flow, Flow_signal, type ='l', ylim = c(-30,30), xaxt='n')
+        axis(1,at = time_axis_flow[1:7],labels = time_axis2[1:7])
+        for (i in 1:nrow(apnea)){
+            polygon(x=c((as.numeric(apnea[i,1]))/16,(as.numeric(apnea[i,1]))/16,(as.numeric(apnea[i,1])/16+duration_ap[i]*8),(as.numeric(apnea[i,1])/16+duration_ap[i]*8)), y=c(-50,50,50,-50), col="#FF990022", border=F)
+        }
+        for (i in 1:nrow(hyp)){
+            polygon(x=c((as.numeric(hyp[i,1]))/16,(as.numeric(hyp[i,1]))/16,(as.numeric(hyp[i,1])/16+duration_hyp[i]*8),(as.numeric(hyp[i,1])/16+duration_hyp[i]*8)), y=c(-50,50,50,-50), col="#0000FF22", border=F)
+        }
+```
+
+```{r wykresy, echo=FALSE}
+patient <- read.edf("https://physionet.org/files/ucddb/1.0.0/ucddb002.rec?download")
+
+start_ecg <- as.numeric(400640-128*5)
+start_flow <- start_ecg/16 #16 times less ticks
+seconds <- 30
+stop_ecg <- start_ecg+(128*seconds) #sampling -> 128 ticks per second
+stop_flow <- start_flow+(8*seconds) #sampling -> 8 ticks per second
+
+start <- (start_ecg/128)
+stop <- (stop_ecg/128)
+time_axis <-seq(start,stop,5)
+time_axis2 <- as.character(hms(time_axis))
+time_axis_ecg <- time_axis*128
+time_axis_flow <- time_axis*8
+
+#creating a plot
+
+ECG_signal <- patient$signal$ECG$data[start_ecg:stop_ecg]
+Flow_signal <- patient$signal$Flow$data[start_flow:stop_flow]
+time_ecg = c(start_ecg:stop_ecg)
+time_flow = c(start_flow:stop_flow)
+
+par(mar = rep(2, 4), mfrow=c(2,1))
+plot (time_ecg, ECG_signal, type ='l', xaxt='n')
+axis(1,at = time_axis_ecg[1:7],labels = time_axis2[1:7])
+polygon(x=c(400640,400640,(400640+18*128),(400640+18*128)), y=c(0,3.5,3.5,0), col="#FF990022", border=F)
+
+plot(time_flow, Flow_signal, type ='l', ylim = c(-30,30), xaxt='n')
+axis(1,at = time_axis_flow[1:7],labels = time_axis2[1:7])
+polygon(x=c(400640/16,400640/16,(400640+18*128)/16,(400640+18*128)/16), y=c(-50,50,50,-50), col="#FF990022", border=F)
+```
+### tabPanel The occurance of disorders
+Kolejna zakladka zawiera tabele przedstawiajaca czas wystapienia danej nieprawidlowosci, celem szybszego znalezienia jej przez zainteresowanego na wykresach. Ponizej przedstawiono kod oraz przykladowe tebele przedstawiajace wyniki dla pierwszego pacjenta.
+```{r second UI, echo=FALSE}
+                tabPanel("The occurrence of disorders ",
+                         verbatimTextOutput("apnea_time"),
+                         verbatimTextOutput("hypo_time")
+                         )
+```
+Wywolywana funkcja jest zagniezdzona w funkcji *output$wykresy_ekg_flow <- renderPlot*
+```{r second server, eval=FALSE}
+        output$apnea_time <- renderPrint({
+            apnea_view
+        })
+        
+        output$hypo_time <- renderPrint({
+            hyp_view
+        })
+```
+
+```{r show second, echo=FALSE}
+        dana <- data.table::fread("https://physionet.org/files/ucddb/1.0.0/ucddb006_respevt.txt?download", sep="auto", header=TRUE, skip=2, fill=TRUE)
+        dana <- dana[,c(1,2,3)]
+        names(dana)[3] <- "Duration"
+        if_apnea <- which(grepl("APN",dana$Type))
+        if_hypopnea <- which(grepl("HYP",dana$Type))
+        apnea <- dana[if_apnea]
+        hyp <- dana[if_hypopnea]
+
+for (i in 1:nrow(apnea)){
+  apnea[i,1] <- sapply(strsplit(toString(apnea[i,1]), ":"), function(n) as.numeric(n) %*% c(3600, 60, 1))
+  apnea[i,1] <- as.numeric(apnea[i,1])*128 #128 tickcs per second
+}
+
+        apnea_view <- apnea
+        apnea_view$Time <- hms(as.numeric(apnea_view$Time)/128)
+        apnea_view <- as.data.frame(apnea_view)
+        apnea_view
+```
+
+### tabPanel Boxplots
+W trzecim panelu wyswietlane sa boxploty przedstawiajace czas trwania bezdechu oraz splycenia oddechu u wybranego pacjenta. Ponizej znajduje sie kod wraz z przykladowym wykresem pacjenta piatego.
+
+```{r panel 3 UI, eval = FALSE}
+            tabPanel("Boxplots", plotOutput("boxes")),
+```
+
+```{r panel 3 server, eval=FALSE}
+    output$boxes <- renderPlot({
+        dana <- data.table::fread(links[chosen()], sep="auto", header=TRUE, skip=2, fill=TRUE)
+        dana <- dana[,c(1,2,3)]
+        names(dana)[3] <- "Duration"
+        if_apnea <- which(grepl("APN",dana$Type))
+        if_hypopnea <- which(grepl("HYP",dana$Type))
+        apnea <- dana[if_apnea]
+        hyp <- dana[if_hypopnea]
+
+        x1 <- apnea[,3]
+        x1$Value <- "Apnea"
+        x2 <- hyp[,3]
+        x2$Value <- "Hypopnea"
+        
+        box_data <- bind_rows(x1,x2)
+        
+        remove(x1,x2)
+        ggplot(box_data, aes(x=Value, y = Duration)) + geom_boxplot()
+        
+    })
+```
+
+```{r panel 3 wywolanie, echo=FALSE}
+        dana <- data.table::fread("https://physionet.org/files/ucddb/1.0.0/ucddb007_respevt.txt?download", sep="auto", header=TRUE, skip=2, fill=TRUE)
+        dana <- dana[,c(1,2,3)]
+        names(dana)[3] <- "Duration"
+        if_apnea <- which(grepl("APN",dana$Type))
+        if_hypopnea <- which(grepl("HYP",dana$Type))
+        apnea <- dana[if_apnea]
+        hyp <- dana[if_hypopnea]
+
+        x1 <- apnea[,3]
+        x1$Value <- "Apnea"
+        x2 <- hyp[,3]
+        x2$Value <- "Hypopnea"
+        
+        box_data <- bind_rows(x1,x2)
+        
+        remove(x1,x2)
+        ggplot(box_data, aes(x=Value, y = Duration)) + geom_boxplot()
+```
+
+## Analizowanie danych
+
+Analiza danych przy pomocy pakietu RHRV okazala sie problematyczna - przede wszystkim pakiet wymaga podania sciezki dostepu do odpowiednio zmodyfikowanego pliku oraz wykorzystanie dodatkowych funkcji w programie Matlab w zwiazku z czym zadecydowalam na zrealizowanie tej czesci projektu poza aplikacja shiny i zestawienie danych lokalnie. 
+Uzycie Matlaba okazalo sie niezbedne, ze wzgledu na blad w funkcji pan_tompkins przeznaczonej dla jezyka R, ktorego nie udalo mi sie ominac.
+
+```{ r analiza - blad, echo = FALSE}
+install.packages("remotes")
+remotes::install_github("vankesteren/rpeaks")
+
+```
+
+Zadecydowalam w zwiazku z tym na analize przy uzyciu pakietu Matlab. Aby bylo to mozliwe dane musialy zostac uprzednio przygotowane. Do Matlaba przekazalam dane z sygnalu EKG w konkretnych interesujacych mnie momentach: 
+
+* wystapienie splycenia oddechowego
+* wystapienie bezdechu
+* brak zauwazalnych problemow oddechowych
+```{r xxx, echo=FALSE}
+patient <- read.edf("C:/Users/mlado/Desktop/ucddb002.rec")
+dana <- data.table::fread("https://physionet.org/files/ucddb/1.0.0/ucddb002_respevt.txt?download", sep="auto", header=TRUE, skip=2, fill=TRUE)
+dana <- dana[,c(1,2,3)]
+names(dana)[3] <- "Duration"
+if_apnea <- which(grepl("APN",dana$Type))
+if_hypopnea <- which(grepl("HYP",dana$Type))
+apnea <- dana[if_apnea]
+hyp <- dana[if_hypopnea]
+
+for (i in 1:nrow(apnea)){
+  apnea[i,1] <- sapply(strsplit(toString(apnea[i,1]), ":"), function(n) as.numeric(n) %*% c(3600, 60, 1))
+  apnea[i,1] <- as.numeric(apnea[i,1])*128 #128 tickcs per second
+}
+
+for (i in 1:nrow(hyp)){
+  hyp[i,1] <- sapply(strsplit(toString(hyp[i,1]), ":"), function(n) as.numeric(n) %*% c(3600, 60, 1))
+  hyp[i,1] <- as.numeric(hyp[i,1])*128 #128 tickcs per second
+}
+
+```
+
+``` {r przygotowanie do matlaba, warning = FALSE}
+setwd ("C:/Users/mlado/Desktop/Projekt_R")
+data_time <- patient$signal$ECG$t
+data_signal <- patient$signal$ECG$data
+
+from <- as.numeric(apnea$Time[1])
+to <- from + as.numeric(apnea$Duration[1])*128
+df <- data.frame(data_time[from:to],data_signal[from:to]) #apnea
+colnames(df)  <- c("time","signal")
+
+write.table(df$signal, file ="apnea_signal.csv", row.names = FALSE, col.names=FALSE)
+```
+
+Otrzymane dane zostaly zaladowane do odpowiednio zmodyfikowanego programu w Matlabie.
+
+``` {r Matlab, eval = FALSE}
+# Czesc 1a. - Wczytanie danych
+
+[filename, pathname] = uigetfile('File Selector'); #Usunieto wymog rozszerzenia '.dat'
+fullpathname = strcat(pathname, filename);
+data = load(fullpathname);
+
+# Częsc 1b. - Wybór kolumny z sygnałem EKG
+
+ecg = data(:,1);
+fs = 128;
+
+# Czesc 4. - Detekcja załamków R + wizualizacja
+# Zmienna qrs zachowuje pozycji załamków QRS jako liczby próbek
+
+[~,qrs,~] = pan_tompkin(ecg,fs,1);
+
+# Czesc 5. - Wyznaczenie częstosci skurczów serca
+# Wyznaczenie odległo¶ci pomiędzy załamkami i przeliczenie do jednostek BPM
+
+hrv = 60./rozniczkuj(qrs,fs);
+
+csvwrite('apneaHR.beats.csv',qrs.') #ten plik zostaje pozniej przekazany do RStudio. qrs jest wektorem - zapisujemy dane jako kolumne przy pomocy .'
+```
+
+Otrzymane dane o wystapieniu zespolu QRS sa zapisywane jako numer probki. Aby moc te dane podac do funkcji analizujacej czas w badaniu musimy je przeksztalcic do czasu w sekundach. Wiemy, ze sygnal EKG byl probkowany 128 razy na sekunde. Po przeksztalceniu danych do odpowiedniej formy ponownie musimy zapisac plik, gdyz funkcja CreateTimeAnalysis() wymaga podania pliku zewnetrznego. Wynikowe dane to parametru zmiennosci rytmu serca.
+```{r obrobka 1, eval = FALSE}
+dana1 <- read.csv("C:/Users/mlado/Desktop/Projekt_R/apneaHR.beats.csv")
+dana1 <- dana1/128
+
+write.table(dana1, file="apneaHR.beats.csv", row.names = FALSE, col.names=FALSE)
+```
+
+``` {r obrobka}
+hrv.data = CreateHRVData()
+hrv.data = SetVerbose(hrv.data,FALSE)
+hrv.data = LoadBeatAscii(hrv.data, "apneaHR1.beats.csv","C:/Users/mlado/Desktop/Projekt_R")
+hrv.data = BuildNIHR(hrv.data)
+hrv.data = FilterNIHR(hrv.data)
+hrv.data = SetVerbose(hrv.data,TRUE)
+hrv.data = CreateTimeAnalysis(hrv.data, size=300, interval = 0.128)
+
+```
+Czynnosc powtarzamy dla czasu wystapienia splycenia oddechowego oraz momentow bez zauwazalnych problemow oddechowych.
+Otrzymane wyniki dla splycenia:
+```{r hypopnea, echo = FALSE}
+hrv.data = CreateHRVData()
+hrv.data = SetVerbose(hrv.data,FALSE)
+hrv.data = LoadBeatAscii(hrv.data, "hypHR1.beats.csv","C:/Users/mlado/Desktop/Projekt_R")
+hrv.data = BuildNIHR(hrv.data)
+hrv.data = FilterNIHR(hrv.data)
+hrv.data = SetVerbose(hrv.data,TRUE)
+hrv.data = CreateTimeAnalysis(hrv.data, size=300, interval = 0.128)
+
+```
+Ze wzgledu na to, ze analizowany czas splycenia odaz bedechu wynosil w obu przypadkach 16 sekund, taki sam przedzial czasowy wybrano dla oddechu bez zauwazalnych problemow oddechowych. Wybrano czas snu od 1:00:00 do 1:00:16.
+```{r none, echo=FALSE}
+hrv.data = CreateHRVData()
+hrv.data = SetVerbose(hrv.data,FALSE)
+hrv.data = LoadBeatAscii(hrv.data, "noneHR1.beats.csv","C:/Users/mlado/Desktop/Projekt_R")
+hrv.data = BuildNIHR(hrv.data)
+hrv.data = FilterNIHR(hrv.data)
+hrv.data = SetVerbose(hrv.data,TRUE)
+hrv.data = CreateTimeAnalysis(hrv.data, size=300, interval = 0.128)
+```
+Otrzymane parametry to:
+ 
+* SDNN - odchylenie standardowe od średniej wartości wszystkich odstępów RR (miara zmiennosci rytmu serca)
+* SDSD - Odchylenie standardowe od średniej różnicy między kolejnymi odstępami RR
+* r-MSSD - pierwiastek kwadratowy ze średniej sumy kwadratów różnic między kolejnymi odstępami RR; odzwierciedla czynność części przywspółczulnej
+* IRRR - przedział międzykwartylowy RR 
+* MADRR - mediana bezwzględnych różnic RR 
+* TINN - wyznacznik długookresowej zmienności rytmu zatokowego (pozwala na eliminację artefaktów)
+* HRV - zmienność rytmu zatokowego
+
+Parametry SDANN, SDNNIDX i pNN50 każdorazowo wynosza 0 poniewaz nie dostarczono wystarczajaco duzo danych - analiza czasowa powinna być stosowana dla długotrwałych rejestracji EKG (najczęściej 24 h), a w naszym przypadku pracujemy na bardzo krotkich odstepach czasowych. 
+
+Ze wzgledu na male przedzialy czasowe nie mozna rowniez odniesc otrzymanych parametrow do norm, ktore byly wyznaczane dla 24-godzinnych przebiegow. Mozna jednak wysnuc wniosek, że miara zmiennosci rytmu serca (SDNN) nie powinna byc zbyt duza - serce powinno bic "rowno". Najwieksza wartosc tego parametru zgodnie z zalozeniem obserwujemy dla okresu bezdechu, a najmniejsza, gdy pacjent nie mial zaklocen snu. Taki sam wniosek dotyczy parametru SDSD. Zauwazamy rowniez, ze splycenie oddechu nie wplywa mocno na wynik analizy, czego nie mozna powiedziec o bezdechu. 
